@@ -72,8 +72,9 @@ jobs:
       # ------------------------------------------------------------
       - name: Deploy Nginx configuration
         run: |
+          # Copy the config file from the repository root
           scp -i ~/.ssh/deploy_key ./nginx-production.conf ${{ env.PROD_USER }}@${{ env.PROD_FRONTEND_HOST }}:/tmp/nginx-taskapp.conf
-
+          
           # Copy config to server
           scp -i ~/.ssh/deploy_key /tmp/nginx-taskapp.conf ${{ env.PROD_USER }}@${{ env.PROD_FRONTEND_HOST }}:/tmp/nginx-taskapp.conf
 
