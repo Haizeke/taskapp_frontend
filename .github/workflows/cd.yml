@@ -6,6 +6,11 @@ on:
     branches: [main]
     types: [completed]
 
+env:
+  PROD_USER: ubuntu                      # Adjust if different
+  PROD_FRONTEND_HOST: ${{ secrets.PROD_FRONTEND_HOST }}    # Public IP or domain of frontend server
+  BACKEND_IP: ${{ secrets.BACKEND_IP }}  # Private IP of backend server
+
 jobs:
   deploy:
     name: Deploy to Production
@@ -13,10 +18,13 @@ jobs:
     if: github.event.workflow_run.conclusion == 'success'
 
     steps:
+      - name: Checkout code
+        uses: actions/checkout@v4          # Needed to access nginx-production.conf
+
       - name: Download artifact
         uses: actions/download-artifact@v4
         with:
-          name: frontend-artifact          # Must match upload name in CI
+          name: frontend-artifact
           run-id: ${{ github.event.workflow_run.id }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
@@ -25,18 +33,17 @@ jobs:
           mkdir -p ~/.ssh
           echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/deploy_key
           chmod 600 ~/.ssh/deploy_key
-          ssh-keyscan -H ${{ secrets.PROD_FRONTEND_HOST }} >> ~/.ssh/known_hosts
+          ssh-keyscan -H ${{ env.PROD_FRONTEND_HOST }} >> ~/.ssh/known_hosts
 
-      - name: Deploy to server
+      # ------------------------------------------------------------
+      # Step 1: Deploy frontend artifact (as before)
+      # ------------------------------------------------------------
+      - name: Deploy frontend files
         run: |
-          # Copy artifact to server
-          scp -i ~/.ssh/deploy_key frontend.tar.gz \
-            ubuntu@${{ secrets.PROD_FRONTEND_HOST }}:/tmp/
+          scp -i ~/.ssh/deploy_key frontend.tar.gz ${{ env.PROD_USER }}@${{ env.PROD_FRONTEND_HOST }}:/tmp/
 
-          # Execute remote commands
-          ssh -i ~/.ssh/deploy_key ubuntu@${{ secrets.PROD_FRONTEND_HOST }} << 'EOF'
+          ssh -i ~/.ssh/deploy_key ${{ env.PROD_USER }}@${{ env.PROD_FRONTEND_HOST }} << 'EOF'
             set -e
-
             TARGET_DIR="/var/www/taskapp"
 
             # Backup current version
@@ -44,24 +51,43 @@ jobs:
               sudo cp -r "$TARGET_DIR" "$TARGET_DIR.backup.$(date +%s)"
             fi
 
-            # Extract new files to a temporary location
+            # Extract new files
             sudo mkdir -p /tmp/new-frontend
             sudo tar -xzf /tmp/frontend.tar.gz -C /tmp/new-frontend
 
-            # Atomically replace the live directory
-            sudo rm -rf "$TARGET_DIR"            # Remove old (or mv aside, but we already have backup)
+            # Atomically replace live directory
+            sudo rm -rf "$TARGET_DIR"
             sudo mv /tmp/new-frontend "$TARGET_DIR"
 
-            # Set ownership and permissions
+            # Set ownership
             sudo chown -R www-data:www-data "$TARGET_DIR"
             sudo chmod -R 755 "$TARGET_DIR"
 
-            # Reload Nginx (graceful, zero downtime)
-            sudo nginx -t && sudo systemctl reload nginx
-
             # Clean up
             rm -f /tmp/frontend.tar.gz
-
-            # Optional: verify the site responds
-            curl -f http://localhost/ || echo "Warning: local health check failed"
           EOF
+
+      # ------------------------------------------------------------
+      # Step 2: Deploy updated Nginx configuration
+      # ------------------------------------------------------------
+      - name: Deploy Nginx configuration
+        run: |
+          # Substitute backend IP placeholder with actual value
+          sed "s/BACKEND_IP_PLACEHOLDER/${{ env.BACKEND_IP }}/" ./nginx-production.conf > /tmp/nginx-taskapp.conf
+
+          # Copy config to server
+          scp -i ~/.ssh/deploy_key /tmp/nginx-taskapp.conf ${{ env.PROD_USER }}@${{ env.PROD_FRONTEND_HOST }}:/tmp/nginx-taskapp.conf
+
+          # Move into place and reload
+          ssh -i ~/.ssh/deploy_key ${{ env.PROD_USER }}@${{ env.PROD_FRONTEND_HOST }} << 'NGINX_EOF'
+            sudo mv /tmp/nginx-taskapp.conf /etc/nginx/sites-available/taskapp
+            sudo ln -sf /etc/nginx/sites-available/taskapp /etc/nginx/sites-enabled/taskapp
+            sudo nginx -t && sudo systemctl reload nginx
+          NGINX_EOF
+
+      # ------------------------------------------------------------
+      # Step 3: Optional – verify deployment
+      # ------------------------------------------------------------
+      - name: Verify site responds
+        run: |
+          ssh -i ~/.ssh/deploy_key ${{ env.PROD_USER }}@${{ env.PROD_FRONTEND_HOST }} "curl -f http://localhost/ || echo 'Warning: local health check failed'"
